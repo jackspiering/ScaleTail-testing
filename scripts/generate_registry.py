@@ -80,10 +80,10 @@ def read_text(path: Path) -> Optional[str]:
 
 def infer_repo_slug(repo_arg: Optional[str]) -> Optional[str]:
     if repo_arg:
-        return repo_arg
+        return validate_repo_slug(repo_arg)
     env_repo = os.environ.get("GITHUB_REPOSITORY")
     if env_repo:
-        return env_repo
+        return validate_repo_slug(env_repo)
     try:
         url = (
             subprocess.check_output(
@@ -104,7 +104,21 @@ def infer_repo_slug(repo_arg: Optional[str]) -> Optional[str]:
         repo = url.split("github.com/", 1)[-1]
     if repo.endswith(".git"):
         repo = repo[:-4]
-    return repo
+    return validate_repo_slug(repo)
+
+
+def resolve_output_path(output_arg: str) -> Path:
+    output_path = Path(output_arg)
+    if not output_path.is_absolute():
+        output_path = REPO_ROOT / output_path
+    resolved = output_path.resolve()
+    try:
+        resolved.relative_to(REPO_ROOT)
+    except ValueError:
+        raise SystemExit(
+            f"Output path '{resolved}' must be inside repository {REPO_ROOT}"
+        )
+    return resolved
 
 
 def build_raw_base(repo: str, ref: str) -> str:
@@ -187,6 +201,7 @@ def main() -> int:
     repo = infer_repo_slug(args.repo)
     if not repo:
         raise SystemExit("Unable to determine repo slug; pass --repo owner/name")
+    ref = validate_ref(args.ref)
 
     templates: List[Dict[str, object]] = []
     for compose_path in sorted(SERVICES_DIR.rglob("compose.yaml")):
@@ -206,7 +221,7 @@ def main() -> int:
         "templates": templates,
     }
 
-    output_path = Path(args.output)
+    output_path = resolve_output_path(args.output)
     output_path.write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
     return 0
 
