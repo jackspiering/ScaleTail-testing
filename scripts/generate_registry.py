@@ -12,17 +12,6 @@ from typing import Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SERVICES_DIR = REPO_ROOT / "services"
-ROOT_README = REPO_ROOT / "README.md"
-REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
-
-
-def slugify(value: str) -> str:
-    value = value.encode("ascii", "ignore").decode()
-    value = value.lower()
-    value = value.replace("&", "and")
-    value = re.sub(r"[^a-z0-9]+", "-", value)
-    return value.strip("-")
 
 
 def title_from_id(value: str) -> str:
@@ -30,7 +19,7 @@ def title_from_id(value: str) -> str:
     return " ".join(p.capitalize() for p in parts if p)
 
 
-def normalize_service_name(value: str) -> str:
+def strip_tailscale_suffix(value: str) -> str:
     base = value.strip()
     patterns = [
         r"\s+with\s+Tailscale\s+Sidecar\s+Configuration\s*$",
@@ -49,6 +38,13 @@ def normalize_service_name(value: str) -> str:
     return base
 
 
+def normalize_service_name(value: str) -> str:
+    base = strip_tailscale_suffix(value)
+    if re.search(r"tailscale", base, re.IGNORECASE):
+        return base
+    return f"{base} with Tailscale"
+
+
 def first_heading(text: str) -> Optional[str]:
     for line in text.splitlines():
         line = line.strip()
@@ -57,66 +53,29 @@ def first_heading(text: str) -> Optional[str]:
     return None
 
 
-def first_paragraph(text: str) -> Optional[str]:
+def extract_frontmatter_tag(text: str) -> Optional[str]:
     lines = text.splitlines()
     idx = 0
-    # skip leading empty lines
     while idx < len(lines) and not lines[idx].strip():
         idx += 1
-    # skip first heading line if present
-    if idx < len(lines) and lines[idx].lstrip().startswith("#"):
-        idx += 1
-        while idx < len(lines) and not lines[idx].strip():
-            idx += 1
-    if idx >= len(lines):
+    if idx >= len(lines) or lines[idx].strip() != "---":
         return None
-    paragraph: List[str] = []
-    while idx < len(lines) and lines[idx].strip():
-        paragraph.append(lines[idx].strip())
+    idx += 1
+    while idx < len(lines) and lines[idx].strip() != "---":
+        match = re.match(r"^tag\s*:\s*(.+)\s*$", lines[idx], flags=re.IGNORECASE)
+        if match:
+            value = match.group(1).strip()
+            if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) > 1:
+                value = value[1:-1].strip()
+            return value or None
         idx += 1
-    if not paragraph:
-        return None
-    return " ".join(paragraph)
+    return None
 
 
 def read_text(path: Path) -> Optional[str]:
     if not path.exists():
         return None
     return path.read_text(encoding="utf-8")
-
-
-def parse_category_map(readme_path: Path) -> Dict[str, str]:
-    text = read_text(readme_path)
-    if not text:
-        return {}
-    category = None
-    mapping: Dict[str, str] = {}
-    for line in text.splitlines():
-        heading = re.match(r"^###\s+(.+)$", line.strip())
-        if heading:
-            category = heading.group(1).strip()
-            continue
-        if not category:
-            continue
-        for match in re.finditer(r"\[Details\]\((services/[^)]+)\)", line):
-            service_path = match.group(1)
-            service_key = service_path.replace("services/", "", 1).strip("/")
-            mapping[service_key] = slugify(category)
-    return mapping
-
-
-def validate_repo_slug(repo: str) -> str:
-    if not REPO_SLUG_RE.match(repo):
-        raise SystemExit(f"Invalid repo slug '{repo}'; expected owner/name")
-    return repo
-
-
-def validate_ref(ref: str) -> str:
-    if not ref or not REF_RE.match(ref):
-        raise SystemExit(f"Invalid ref '{ref}'")
-    if ref.startswith("/") or ref.endswith("/") or ".." in ref or "//" in ref:
-        raise SystemExit(f"Invalid ref '{ref}'")
-    return ref
 
 
 def infer_repo_slug(repo_arg: Optional[str]) -> Optional[str]:
@@ -180,7 +139,6 @@ def build_template(
     compose_path: Path,
     repo: str,
     ref: str,
-    category_map: Dict[str, str],
 ) -> Dict[str, object]:
     rel_compose = compose_path.relative_to(REPO_ROOT).as_posix()
     service_rel = compose_path.parent.relative_to(SERVICES_DIR).as_posix()
@@ -188,19 +146,22 @@ def build_template(
     name = title_from_id(template_id)
 
     readme_path, parent_readme = pick_readme(compose_path.parent)
-    description = None
+    tag_value = "ScaleTail"
     if readme_path:
         readme_text = read_text(readme_path)
         if readme_text:
             heading = first_heading(readme_text)
             if heading and not (parent_readme and "/" in service_rel):
                 name = heading
-            description = first_paragraph(readme_text)
-
-    if not description:
-        description = f"Self-hosted {name} template."
+            tag = extract_frontmatter_tag(readme_text)
+            if tag:
+                tag_value = tag
 
     name = normalize_service_name(name)
+    description_name = strip_tailscale_suffix(name)
+    description = (
+        f"ScaleTail configuration for {description_name} running a Tailscale sidecar."
+    )
 
     env_path = compose_path.parent / ".env"
     rel_env = env_path.relative_to(REPO_ROOT).as_posix()
@@ -210,13 +171,6 @@ def build_template(
         documentation_url = (
             build_raw_base(repo, ref) + "/" + readme_path.relative_to(REPO_ROOT).as_posix()
         )
-
-    category_tag = None
-    if service_rel in category_map:
-        category_tag = category_map[service_rel]
-    else:
-        parent_key = service_rel.split("/", 1)[0]
-        category_tag = category_map.get(parent_key, "scaletail")
 
     template = {
         "id": template_id,
@@ -228,7 +182,7 @@ def build_template(
         "env_url": build_raw_base(repo, ref) + "/" + rel_env,
         "documentation_url": documentation_url
         or build_raw_base(repo, ref) + "/" + rel_compose,
-        "tags": [category_tag],
+        "tags": [tag_value],
     }
     return template
 
@@ -249,14 +203,12 @@ def main() -> int:
         raise SystemExit("Unable to determine repo slug; pass --repo owner/name")
     ref = validate_ref(args.ref)
 
-    category_map = parse_category_map(ROOT_README)
-
     templates: List[Dict[str, object]] = []
     for compose_path in sorted(SERVICES_DIR.rglob("compose.yaml")):
         env_path = compose_path.parent / ".env"
         if not env_path.exists():
             raise SystemExit(f"Missing .env for {compose_path}")
-        templates.append(build_template(compose_path, repo, ref, category_map))
+        templates.append(build_template(compose_path, repo, args.ref))
 
     templates.sort(key=lambda t: str(t["id"]))
 
