@@ -14,6 +14,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SERVICES_DIR = REPO_ROOT / "services"
 REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+TAG_MAX_LEN = 32
+NAME_MAX_LEN = 80
+TAG_SANITIZE_RE = re.compile(r"[^A-Za-z0-9 _.-]")
+NAME_SANITIZE_RE = re.compile(r"[\x00-\x1f\x7f<>]")
 
 
 def title_from_id(value: str) -> str:
@@ -55,6 +59,22 @@ def first_heading(text: str) -> Optional[str]:
     return None
 
 
+def sanitize_name(value: str) -> str:
+    cleaned = NAME_SANITIZE_RE.sub("", value)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        cleaned = "Service"
+    return cleaned[:NAME_MAX_LEN]
+
+
+def sanitize_tag(value: str) -> Optional[str]:
+    cleaned = TAG_SANITIZE_RE.sub("", value)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return None
+    return cleaned[:TAG_MAX_LEN]
+
+
 def _parse_tag_values(raw: str) -> List[str]:
     value = raw.strip()
     if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) > 1:
@@ -68,8 +88,9 @@ def _parse_tag_values(raw: str) -> List[str]:
             continue
         if part.startswith(("'", '"')) and part.endswith(("'", '"')) and len(part) > 1:
             part = part[1:-1].strip()
-        if part:
-            tags.append(part)
+        cleaned = sanitize_tag(part)
+        if cleaned:
+            tags.append(cleaned)
     return tags
 
 
@@ -102,10 +123,22 @@ def extract_frontmatter_tags(text: str) -> List[str]:
     return []
 
 
+def dedupe_tags(tags: List[str]) -> List[str]:
+    seen: set[str] = set()
+    result: List[str] = []
+    for tag in tags:
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(tag)
+    return result
+
+
 def ensure_scaletail_tag(tags: List[str]) -> List[str]:
     if any(tag.lower() == "scaletail" for tag in tags):
-        return tags
-    return ["ScaleTail", *tags]
+        return dedupe_tags(tags)
+    return dedupe_tags(["ScaleTail", *tags])
 
 
 def read_text(path: Path) -> Optional[str]:
@@ -193,7 +226,7 @@ def build_template(
     rel_compose = compose_path.relative_to(REPO_ROOT).as_posix()
     service_rel = compose_path.parent.relative_to(SERVICES_DIR).as_posix()
     template_id = service_rel.replace("/", "-")
-    name = title_from_id(template_id)
+    name = sanitize_name(title_from_id(template_id))
 
     readme_path, parent_readme = pick_readme(compose_path.parent)
     tag_values = ["ScaleTail"]
@@ -202,7 +235,7 @@ def build_template(
         if readme_text:
             heading = first_heading(readme_text)
             if heading and not (parent_readme and "/" in service_rel):
-                name = heading
+                name = sanitize_name(heading)
             tags = extract_frontmatter_tags(readme_text)
             if tags:
                 tag_values = tags
