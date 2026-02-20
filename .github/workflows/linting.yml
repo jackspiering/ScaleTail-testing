@@ -30,6 +30,7 @@ jobs:
       - name: Markdown Linting
         uses: DavidAnson/markdownlint-cli2-action@v22
         with:
-          config: "./.markdownlint.yml"
-          globs: "./services/**/*.md"
+          config: ".markdownlint.yml"
+          globs: |
+            "./services/**/*.md"
           fix: true
