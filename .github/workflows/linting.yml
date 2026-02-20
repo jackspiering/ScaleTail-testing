@@ -32,5 +32,5 @@ jobs:
         with:
           config: ".markdownlint.yml"
           globs: |
-            "./services/**/*.md"
+            services/**/*.md
           fix: true
